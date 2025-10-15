@@ -1,0 +1,8 @@
+export function Step2Confirm() {
+  return (
+    <div>
+      <h2>Etapa 2: Confirmação</h2>
+      <p>Confirme os dados carregados antes de prosseguir.</p>
+    </div>
+  );
+}

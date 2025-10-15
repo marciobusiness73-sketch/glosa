@@ -1,0 +1,4 @@
+{
+  "name": "glosa",
+  "description": "A multi-step application to automatically generate medical billing appeals (recursos de glosa) by answering a series of questions and uploading relevant documents. The app uses AI to draft the appeal text."
+}

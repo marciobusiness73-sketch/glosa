@@ -1,8 +1,0 @@
-export function Step1Upload() {
-  return (
-    <div>
-      <h2>Etapa 1: Upload de Arquivo</h2>
-      <input type="file" />
-    </div>
-  );
-}

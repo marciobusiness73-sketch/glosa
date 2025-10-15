@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Glosa Appeal Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://unpkg.com/docx@8.5.0/build/index.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://aistudiocdn.com/react@^19.2.0",
+        "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client",
+        "@google/genai": "https://aistudiocdn.com/@google/genai@^1.24.0"
+      }
+    }
+    </script>
+    <style>
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fadeIn {
+        animation: fadeIn 0.5s ease-out forwards;
+      }
+       /* Custom scrollbar for better aesthetics */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #a8a8a8;
+        border-radius: 10px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #888;
+      }
+    </style>
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { GoogleGenAI } from "@google/genai";
+
+      const { useState, useCallback, useRef, useEffect, Fragment, StrictMode } = React;
+
+      // From types.ts
+      const Step = {
+        Upload: 1,
+        Confirm: 2,
+        Questions: 3,
+        Preview: 4,
+        Success: 5,
+      };
+
+      // From services/geminiService.ts
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+      const fileToGenerativePart = async (file) => {
+          const base64EncodedData = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result.split(',')[1]);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+          });
+
+          return {
+              inlineData: {
+                  mimeType: file.type,
+                  data: base64EncodedData,
+              },
+          };
+      };
+
+      const readFileAsText = (file) => {
+          return new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = (event) => resolve(event.target?.result);
+              reader.onerror = (error) => reject(error);
+              reader.readAsText(file);
+          });
+      };
+
+      const readFileAsArrayBuffer = (file) => {
+          return new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = (event) => resolve(event.target?.result);
+              reader.onerror = (error) => reject(error);
+              reader.readAsArrayBuffer(file);
+          });
+      };
+
+      const extractDataFromFile = async (file) => {
+          const textBasedMimeTypes = ['text/csv', 'application/xml', 'text/xml', 'text/plain'];
+          const supportedBinaryMimeTypes = ['application/pdf'];
+          const xlsxMimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+          const prompt = `Analise o documento de glosa e extraia o número da guia principal e uma lista de todos os itens glosados.
+      Para cada item, extraia: nome do paciente, número da carteira, código do procedimento, valor glosado e a justificativa da glosa.
+      
+      Retorne os dados estritamente no formato JSON. O JSON deve ter a seguinte estrutura:
+      {
+        "guiaNumber": "string",
+        "items": [
+          {
+            "patientName": "string",
+            "insuranceId": "string",
+            "procedureCode": "string",
+            "glosaValue": "string",
+            "glosaJustification": "string"
+          }
+        ]
+      }
+
+      Se uma informação específica não for encontrada, retorne uma string vazia para o campo correspondente.
+      Se nenhum item glosado for encontrado, retorne a chave "items" com um array vazio.
+      O JSON deve estar limpo, sem nenhum texto ou formatação adicional como \`\`\`json.`;
+
+          let requestContents;
+
+          if (textBasedMimeTypes.includes(file.type)) {
+              const fileContentAsText = await readFileAsText(file);
+              const fullPrompt = `Conteúdo do arquivo (${file.name}):\n\n${fileContentAsText}\n\n---\n\nInstrução: ${prompt}`;
+              requestContents = { parts: [{ text: fullPrompt }] };
+          } else if (supportedBinaryMimeTypes.includes(file.type)) {
+              const filePart = await fileToGenerativePart(file);
+              requestContents = { parts: [filePart, { text: prompt }] };
+          } else if (file.type === xlsxMimeType || file.name.endsWith('.xlsx')) {
+              try {
+                  const arrayBuffer = await readFileAsArrayBuffer(file);
+                  const data = new Uint8Array(arrayBuffer);
+                  const workbook = XLSX.read(data, { type: 'array' });
+                  const firstSheetName = workbook.SheetNames[0];
+                  const worksheet = workbook.Sheets[firstSheetName];
+                  const csvContent = XLSX.utils.sheet_to_csv(worksheet);
+                  
+                  const fullPrompt = `O seguinte conteúdo foi extraído de uma planilha XLSX (${file.name}) e convertido para o formato CSV. Analise-o:\n\n${csvContent}\n\n---\n\nInstrução: ${prompt}`;
+                  requestContents = { parts: [{ text: fullPrompt }] };
+
+              } catch (err) {
+                  console.error("Error processing XLSX file:", err);
+                  throw new Error("Não foi possível processar o arquivo XLSX. Verifique se o arquivo não está corrompido.");
+              }
+          } else {
+              throw new Error(`Tipo de arquivo não suportado: ${file.type || file.name}. Use PDF, CSV, XML ou XLSX.`);
+          }
+
+          try {
+              const response = await ai.models.generateContent({
+                  model: 'gemini-2.5-pro',
+                  contents: requestContents,
+              });
+              
+              if (response.promptFeedback?.blockReason) {
+                   throw new Error(`A análise foi bloqueada por filtros de segurança (Motivo: ${response.promptFeedback.blockReason}). Verifique o conteúdo do arquivo.`);
+              }
+
+              if (!response.text || response.text.trim() === '') {
+                  const finishReason = response.candidates?.[0]?.finishReason;
+                  if (finishReason === 'SAFETY') {
+                       throw new Error("A resposta da IA foi bloqueada por filtros de segurança. Isso pode acontecer com documentos contendo informações sensíveis.");
+                  }
+                  if (finishReason === 'RECITATION') {
+                      throw new Error("A resposta da IA foi bloqueada por conter material citado. Tente um arquivo diferente.");
+                  }
+                  if (finishReason === 'OTHER' || finishReason === 'MAX_TOKENS') {
+                       throw new Error(`A IA encerrou a análise de forma inesperada (Motivo: ${finishReason}). O arquivo pode ser muito grande ou complexo.`);
+                  }
+                  throw new Error("A IA não retornou uma resposta para análise. O arquivo pode estar vazio ou em um formato ilegível.");
+              }
+              
+              let jsonText = response.text.trim();
+              if (jsonText.startsWith('```json')) {
+                  jsonText = jsonText.substring(7, jsonText.length - 3).trim();
+              } else if (jsonText.startsWith('```')) {
+                  jsonText = jsonText.substring(3, jsonText.length - 3).trim();
+              }
+              
+              const rawData = JSON.parse(jsonText);
+              const glosaItems = rawData.items || [];
+              
+              return {
+                  guiaNumber: rawData.guiaNumber,
+                  glosaItems: glosaItems,
+              };
+
+          } catch (error) {
+              console.error("Error extracting data from file:", error);
+              if (error instanceof Error) {
+                  const specificErrors = ['segurança', 'inesperada', 'citado', 'XLSX', 'suportado', 'A IA não retornou'];
+                  if (specificErrors.some(e => error.message.includes(e))) {
+                      throw error;
+                  }
+                  if (error instanceof SyntaxError) {
+                      throw new Error("A IA retornou uma resposta em texto que não é um JSON válido. Verifique o conteúdo do arquivo.");
+                  }
+              }
+              throw new Error("Não foi possível extrair os dados do arquivo. A IA não conseguiu processar o documento. Verifique o conteúdo ou tente um formato diferente (PDF, CSV, XLSX).");
+          }
+      };
+
+      const generateAppealText = async (data) => {
+        const commonJustification = data.glosaItems[0]?.glosaJustification || 'Não informada';
+
+        const itemsDetails = data.glosaItems.map((item, index) => `
+          - Item ${index + 1}: Paciente: ${item.patientName || 'Não informado'} | Carteira: ${item.insuranceId || 'Não informada'} | Procedimento: ${item.procedureCode || 'Não informado'} | Valor: ${item.glosaValue || 'Não informado'}
+        `).join('');
+
+        const prompt = `
+          Você é um especialista em faturamento médico e recursos de glosa no Brasil. Com base nas informações a seguir, redija uma carta de recurso formal e profissional para a operadora de saúde. A carta deve ser clara, concisa e persuasiva, abordando um grupo de itens glosados pelo mesmo motivo sob a mesma guia. Use um tom respeitoso e técnico. Estruture a carta com cabeçalho, saudação, corpo do texto detalhando os argumentos, e uma conclusão com despedida.
+
+          **Dados Gerais da Guia:**
+          - Número da Guia: ${data.guiaNumber || 'Não informado'}
+          
+          **Grupo de Itens em Recurso:**
+          - Justificativa da Operadora (comum a todos os itens): "${commonJustification}"
+          - Quantidade de Itens neste grupo: ${data.totalGlosas}
+          - Valor Total deste grupo: R$ ${data.totalGlosaValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+
+          **Itens Afetados:**
+          ${itemsDetails}
+
+          **Argumentos para o Recurso:**
+          - O procedimento foi realizado conforme a solicitação médica? ${data.medicalRequest === 'sim' ? 'Sim, prescrição em anexo.' : 'Não aplicável ou não.'}
+          - O procedimento está de acordo com o contrato/cobertura? ${data.contractCompliance === 'sim' ? 'Sim, conforme cláusula/item: ' + (data.contractClause || 'especificado no contrato') : 'Não aplicável ou não.'}
+          - Houve autorização prévia para o procedimento? ${data.priorAuthorization === 'sim' ? 'Sim, guia de autorização em anexo.' : 'Não aplicável ou não.'}
+          - O código do procedimento faturado está correto? ${data.isCorrectProcedureCode === 'sim' ? 'Sim.' : 'Não, o código correto é: ' + (data.correctProcedureCode || 'a ser verificado')}
+          - O valor cobrado está de acordo com a tabela acordada? ${data.isCorrectValue === 'sim' ? 'Sim.' : 'Não, o valor correto é: ' + (data.correctValue || 'a ser verificado')}
+          - Comentários Técnicos Adicionais: ${data.technicalComments || "Nenhum."}
+          - Prazo para envio do recurso: ${data.deadline ? new Date(data.deadline).toLocaleDateString('pt-BR') : 'Não especificado'}
+
+          **Documentação de Suporte Anexada:**
+          ${data.medicalRequestFiles.length > 0 ? '- Cópia da Prescrição Médica\\n' : ''}
+          ${data.priorAuthorizationFiles.length > 0 ? '- Cópia da Guia de Autorização\\n' : ''}
+          ${data.additionalFiles.length > 0 ? '- Outros documentos comprobatórios (' + data.additionalFiles.length + ' arquivo(s))\\n' : ''}
+          
+          Gere o texto completo do recurso em português do Brasil. O texto deve ser coeso e focar na justificativa comum para todos os itens listados.
+        `;
+
+        try {
+          const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: prompt
+          });
+
+          if (response.promptFeedback?.blockReason) {
+              return `A geração do recurso foi bloqueada por filtros de segurança (Motivo: ${response.promptFeedback.blockReason}).`;
+          }
+
+          if (!response.text || response.text.trim() === '') {
+            const finishReason = response.candidates?.[0]?.finishReason;
+            if (finishReason === 'SAFETY') {
+                return "A geração do texto foi bloqueada por filtros de segurança. Por favor, revise os dados de entrada.";
+            }
+            return "A IA gerou uma resposta vazia. Por favor, revise os dados fornecidos e tente novamente.";
+          }
+          return response.text;
+        } catch (error) {
+          console.error("Error generating appeal text:", error);
+          return "Ocorreu um erro ao gerar o texto do recurso. Por favor, tente novamente.";
+        }
+      };
+      
+      // From components/FileUpload.tsx
+      const FileUpload = ({ onFilesChange, acceptedFormats, multiple = false, label, files }) => {
+        const [isHighlighted, setIsHighlighted] = useState(false);
+        const [feedback, setFeedback] = useState({ type: 'idle', message: '' });
+        const fileInputRef = useRef(null);
+
+        useEffect(() => {
+          if (feedback.type === 'success' || feedback.type === 'error') {
+            const timer = setTimeout(() => {
+              setFeedback({ type: 'idle', message: '' });
+            }, 5000);
+            return () => clearTimeout(timer);
+          }
+        }, [feedback]);
+
+        const validateAndProcessFiles = useCallback((incomingFiles) => {
+          const acceptedMimeTypesAndExtensions = acceptedFormats.split(',').map(f => f.trim().toLowerCase());
+          
+          const validFiles = [];
+          const invalidFiles = [];
+
+          incomingFiles.forEach(file => {
+            const fileExtension = `.${file.name.split('.').pop()?.toLowerCase()}`;
+            const mimeType = file.type.toLowerCase();
+
+            const isAccepted = acceptedMimeTypesAndExtensions.some(acceptedFormat => {
+              if (acceptedFormat.startsWith('.')) return fileExtension === acceptedFormat;
+              if (acceptedFormat.endsWith('/*')) return mimeType.startsWith(acceptedFormat.slice(0, -1));
+              return mimeType === acceptedFormat;
+            });
+
+            if (isAccepted) validFiles.push(file);
+            else invalidFiles.push(file);
+          });
+
+          if (invalidFiles.length > 0) {
+            const invalidNames = invalidFiles.map(f => f.name).join(', ');
+            setFeedback({ type: 'error', message: `Tipo de arquivo não suportado: ${invalidNames}` });
+          } else if (validFiles.length > 0) {
+            setFeedback({ type: 'success', message: 'Arquivo(s) carregado(s) com sucesso!' });
+          }
+
+          if (validFiles.length > 0) {
+            const currentFiles = multiple ? [...files] : [];
+            const newUniqueFiles = validFiles.filter(vf => !currentFiles.some(cf => cf.name === vf.name && cf.size === vf.size));
+            const updatedFiles = [...currentFiles, ...newUniqueFiles];
+            onFilesChange(updatedFiles);
+          }
+        }, [acceptedFormats, files, multiple, onFilesChange]);
+
+        const handleDragOver = useCallback((e) => { e.preventDefault(); setIsHighlighted(true); }, []);
+        const handleDragLeave = useCallback(() => setIsHighlighted(false), []);
+        const handleDrop = useCallback((e) => {
+          e.preventDefault();
+          setIsHighlighted(false);
+          const droppedFiles = Array.from(e.dataTransfer.files);
+          if (droppedFiles.length) validateAndProcessFiles(droppedFiles);
+        }, [validateAndProcessFiles]);
+
+        const handleFileChange = (e) => {
+          const selectedFiles = Array.from(e.target.files || []);
+          if (selectedFiles.length) validateAndProcessFiles(selectedFiles);
+          if (fileInputRef.current) fileInputRef.current.value = '';
+        };
+
+        const removeFile = (index) => {
+          const newFiles = [...files];
+          newFiles.splice(index, 1);
+          onFilesChange(newFiles);
+        };
+
+        const getBorderClass = () => {
+          if (isHighlighted) return 'border-blue-500 bg-blue-50';
+          if (feedback.type === 'success') return 'border-green-500 bg-green-50';
+          if (feedback.type === 'error') return 'border-red-500 bg-red-50';
+          return 'border-gray-300';
+        };
+
+        return React.createElement('div', null,
+          React.createElement('div', {
+            className: `border-2 border-dashed ${getBorderClass()} p-6 text-center rounded-lg cursor-pointer transition-all duration-300`,
+            onClick: () => fileInputRef.current?.click(),
+            onDragOver: handleDragOver,
+            onDragLeave: handleDragLeave,
+            onDrop: handleDrop,
+            role: "button",
+            "aria-label": "File upload area"
+          },
+            React.createElement('input', { type: "file", ref: fileInputRef, accept: acceptedFormats, multiple: multiple, onChange: handleFileChange, className: "hidden" }),
+            React.createElement('p', { className: "text-gray-500" }, React.createElement('i', { className: "fas fa-file-upload mr-2" }), ` ${label}`)
+          ),
+          feedback.message && React.createElement('p', { className: `mt-2 text-sm text-center ${feedback.type === 'error' ? 'text-red-600' : 'text-green-600'}`, role: "alert" }, feedback.message),
+          files.length > 0 && React.createElement('div', { className: "mt-3 p-3 border border-gray-200 rounded-lg max-h-40 overflow-y-auto" },
+            React.createElement('ul', { "aria-label": "Uploaded files" },
+              files.map((file, index) => React.createElement('li', { key: `${file.name}-${index}`, className: "flex justify-between items-center p-2 border-b border-gray-100 last:border-b-0" },
+                React.createElement('div', { className: "flex items-center min-w-0" },
+                  React.createElement('i', { className: "fas fa-check-circle text-green-500 mr-2 flex-shrink-0", "aria-hidden": "true" }),
+                  React.createElement('span', { className: "text-sm text-gray-700 truncate" }, file.name)
+                ),
+                React.createElement('button', { onClick: () => removeFile(index), className: "text-red-500 hover:text-red-700 ml-2 flex-shrink-0", "aria-label": `Remove ${file.name}` },
+                  React.createElement('i', { className: "fas fa-trash" })
+                )
+              ))
+            )
+          )
+        );
+      };
+      
+      // From components/ProgressTracker.tsx
+      const ProgressTracker = ({ currentStep }) => {
+        const steps = [
+          { number: 1, title: 'Upload' }, { number: 2, title: 'Confirmar' }, { number: 3, title: 'Perguntas' },
+          { number: 4, title: 'Pré-visualizar' }, { number: 5, title: 'Sucesso' },
+        ];
+        return React.createElement('div', { className: "flex items-start w-full mb-12" },
+          steps.map((step, index) => {
+            const isCompleted = currentStep > step.number;
+            const isActive = currentStep === step.number;
+            const isLineActive = currentStep > index + 1;
+            return React.createElement(Fragment, { key: step.number },
+              React.createElement('div', { className: "flex flex-col items-center flex-shrink-0" },
+                React.createElement('div', {
+                  className: `w-10 h-10 rounded-full flex items-center justify-center font-bold text-white transition-all duration-300 transform ${isCompleted ? 'bg-green-500' : ''} ${isActive ? 'bg-blue-500 ring-4 ring-blue-200 scale-110' : ''} ${!isCompleted && !isActive ? 'bg-gray-300' : ''}`
+                }, isCompleted ? React.createElement('i', { className: "fas fa-check" }) : step.number),
+                React.createElement('p', { className: `mt-2 text-xs text-center font-semibold transition-colors duration-300 w-20 ${isActive ? 'text-blue-600' : 'text-gray-500'}`}, step.title)
+              ),
+              index < steps.length - 1 && React.createElement('div', { className: `flex-1 h-1 transition-colors duration-500 mt-5 ${isLineActive ? 'bg-blue-500' : 'bg-gray-300'}`})
+            );
+          })
+        );
+      };
+      
+      // From components/Step1Upload.tsx
+      const Step1Upload = ({ onDataExtracted, initialData }) => {
+        const [isLoading, setIsLoading] = useState(false);
+        const [error, setError] = useState(null);
+        const [fileName, setFileName] = useState('');
+
+        const handleFileChange = async (e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            const file = e.target.files[0];
+            setIsLoading(true);
+            setError(null);
+            setFileName(file.name);
+            try {
+              const extractedData = await extractDataFromFile(file);
+              onDataExtracted({ ...extractedData, fileName: file.name });
+            } catch (err) {
+              const errorMessage = err instanceof Error ? err.message : String(err);
+              setError(errorMessage);
+              setFileName('');
+            } finally {
+              setIsLoading(false);
+            }
+          }
+        };
+
+        const handleCancel = () => {
+          setFileName('');
+          setError(null);
+          const fileInput = document.getElementById('fileInput');
+          if (fileInput) fileInput.value = '';
+        };
+        
+        return React.createElement('div', { className: "animate-fadeIn" },
+          React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-2" }, "1. Importar Arquivo de Glosa"),
+          React.createElement('p', { className: "text-gray-600 mb-6" }, "Envie o arquivo contendo as informações da glosa (XLSX, CSV, PDF ou XML)."),
+          React.createElement('div', {
+            className: `file-upload border-2 border-dashed ${isLoading ? 'border-blue-300 bg-blue-50 cursor-wait' : 'border-gray-300 hover:border-blue-500 hover:bg-blue-50 cursor-pointer'} p-8 text-center rounded-lg transition-all`,
+            onClick: () => !isLoading && document.getElementById('fileInput')?.click()
+          },
+            React.createElement('input', { type: "file", id: "fileInput", accept: ".xlsx,.csv,.pdf,.xml", className: "hidden", onChange: handleFileChange, disabled: isLoading }),
+            React.createElement('p', { className: "text-gray-500" }, React.createElement('i', { className: `fas ${isLoading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} text-3xl text-blue-500 mb-3` })),
+            React.createElement('p', { className: "text-gray-700" }, isLoading ? 'Analisando documento com IA...' : 'Arraste e solte o arquivo aqui ou clique para selecionar'),
+            !isLoading && fileName && !error && React.createElement('p', { className: "text-green-600 mt-2 text-sm" }, `Arquivo carregado: ${fileName}`),
+            error && React.createElement('p', { className: "text-red-600 mt-2 text-sm font-semibold" }, error)
+          ),
+          React.createElement('div', { className: "flex justify-start mt-8" },
+            React.createElement('button', { onClick: handleCancel, disabled: isLoading || !fileName, className: "bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed" }, "Cancelar")
+          )
+        );
+      };
+
+      // From components/Step2Confirm.tsx
+      const SummaryCard = ({ label, value, icon }) => React.createElement('div', { className: "flex-1 p-4 bg-gray-50 border border-gray-200 rounded-lg flex items-center" },
+          React.createElement('div', { className: `text-2xl text-blue-500 mr-4 ${icon}` }),
+          React.createElement('div', null,
+              React.createElement('div', { className: "text-sm text-gray-500" }, label),
+              React.createElement('div', { className: "text-xl font-bold text-gray-800" }, value)
+          )
+      );
+
+      const GroupSelection = ({ groups, onSelectGroup, processedKeys, onStartOver }) => React.createElement('div', null,
+          React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-2" }, "2. Selecionar Grupo para Recurso"),
+          React.createElement('p', { className: "text-gray-600 mb-6" }, "A IA encontrou os seguintes grupos de glosas no arquivo. Selecione um grupo para iniciar o processo de recurso."),
+          React.createElement('div', { className: "space-y-4 max-h-96 overflow-y-auto pr-2" },
+              groups.map(group => {
+                  const isProcessed = processedKeys.has(group.key);
+                  return React.createElement('div', { key: group.key, className: `p-4 border rounded-lg flex justify-between items-center transition-all duration-300 ${isProcessed ? 'bg-green-100 border-green-300 shadow-sm' : 'bg-white hover:shadow-md'}` },
+                      React.createElement('div', null,
+                          React.createElement('p', { className: `font-bold ${isProcessed ? 'text-green-900' : 'text-gray-800'}` }, `Guia: ${group.guiaNumber}`),
+                          React.createElement('p', { className: `text-sm truncate max-w-md ${isProcessed ? 'text-green-800' : 'text-gray-600'}` }, `Justificativa: "${group.glosaJustification}"`),
+                          React.createElement('p', { className: `text-sm mt-1 ${isProcessed ? 'text-green-700' : 'text-gray-500'}` }, `${group.totalGlosas} item(s) - Total: R$ ${group.totalGlosaValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
+                      ),
+                      React.createElement('button', { onClick: () => onSelectGroup(group), disabled: isProcessed, className: "bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-2" },
+                          isProcessed ? React.createElement(Fragment, null, React.createElement('i', { className: "fas fa-check" }), " Concluído") : 'Processar'
+                      )
+                  );
+              })
+          ),
+          React.createElement('div', { className: "flex justify-between mt-8" },
+              React.createElement('button', { onClick: onStartOver, className: "bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded transition-colors" }, "Enviar Outro Arquivo")
+          )
+      );
+
+      const ConfirmationDetails = ({ data, onNext, onBack }) => React.createElement('div', null,
+          React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-2" }, "3. Confirmar Dados do Grupo"),
+          React.createElement('p', { className: "text-gray-600 mb-6" }, "Verifique os dados extraídos para o grupo selecionado. Se estiver correto, continue para responder as perguntas."),
+          React.createElement('div', { className: "space-y-6" },
+              React.createElement('div', null,
+                  React.createElement('label', { className: "block text-gray-700 font-semibold mb-2" }, "Número da Guia:"),
+                  React.createElement('input', { type: "text", value: data.guiaNumber, readOnly: true, className: "w-full p-2 bg-gray-100 border border-gray-300 rounded-md focus:outline-none text-gray-900 font-medium" })
+              ),
+              React.createElement('div', { className: "flex gap-4" },
+                  React.createElement(SummaryCard, { label: "Total de Glosas no Grupo", value: data.totalGlosas, icon: "fas fa-file-invoice" }),
+                  React.createElement(SummaryCard, { label: "Valor Total do Grupo", value: `R$ ${data.totalGlosaValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, icon: "fas fa-dollar-sign" })
+              ),
+              React.createElement('div', null,
+                  React.createElement('h3', { className: "text-lg font-semibold text-gray-800 mb-2" }, "Itens no Grupo:"),
+                  React.createElement('div', { className: "max-h-64 overflow-y-auto border border-gray-200 rounded-lg" },
+                      React.createElement('table', { className: "min-w-full divide-y divide-gray-200" },
+                          React.createElement('thead', { className: "bg-gray-50 sticky top-0" },
+                              React.createElement('tr', null,
+                                  React.createElement('th', { scope: "col", className: "px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" }, "Paciente"),
+                                  React.createElement('th', { scope: "col", className: "px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" }, "Cód. Procedimento"),
+                                  React.createElement('th', { scope: "col", className: "px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" }, "Valor")
+                              )
+                          ),
+                          React.createElement('tbody', { className: "bg-white divide-y divide-gray-200" },
+                              data.glosaItems.map((item, index) => React.createElement('tr', { key: index },
+                                  React.createElement('td', { className: "px-4 py-3 whitespace-nowrap text-sm text-gray-700" }, item.patientName || 'N/A'),
+                                  React.createElement('td', { className: "px-4 py-3 whitespace-nowrap text-sm text-gray-700" }, item.procedureCode || 'N/A'),
+                                  React.createElement('td', { className: "px-4 py-3 whitespace-nowrap text-sm text-gray-700" }, item.glosaValue || 'N/A')
+                              ))
+                          )
+                      ),
+                      data.glosaItems.length === 0 && React.createElement('p', { className: "p-4 text-center text-gray-500" }, "Nenhum item encontrado.")
+                  )
+              )
+          ),
+          React.createElement('div', { className: "flex justify-between mt-8" },
+              React.createElement('button', { onClick: onBack, className: "bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded transition-colors" }, "Voltar para Lista"),
+              React.createElement('button', { onClick: onNext, className: "bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded transition-colors" }, "Confirmar e Continuar")
+          )
+      );
+
+      const Step2Confirm = ({ data, groups, selectedGroupKey, onSelectGroup, onDeselectGroup, onNext, onStartOver, processedGroupKeys }) => {
+        return React.createElement('div', { className: "animate-fadeIn" },
+          selectedGroupKey ? 
+            React.createElement(ConfirmationDetails, { data, onNext, onBack: onDeselectGroup }) : 
+            React.createElement(GroupSelection, { groups, onSelectGroup, processedKeys: processedGroupKeys, onStartOver })
+        );
+      };
+      
+      // From components/Step3Questions.tsx
+      const Step3Questions = ({ data, setData, onNext, onBack }) => {
+        const handleChange = (e) => {
+          const { id, value } = e.target;
+          setData({ ...data, [id]: value });
+        };
+        const handleFileChange = (field) => (files) => {
+          setData({ ...data, [field]: files });
+        };
+        const createQuestionBlock = (id, label, condition, child) => React.createElement('div', { className: "p-4 border border-gray-200 rounded-lg" },
+            React.createElement('label', { className: "block text-gray-700 font-semibold mb-2" }, label),
+            React.createElement('select', { id, value: data[id], onChange: handleChange, className: "w-full p-2 border border-gray-300 rounded-md" },
+              React.createElement('option', { value: "" }, "Selecione..."),
+              React.createElement('option', { value: "sim" }, "Sim"),
+              React.createElement('option', { value: "nao" }, "Não")
+            ),
+            condition && React.createElement('div', { className: "mt-4" }, child)
+        );
+
+        return React.createElement('div', { className: "animate-fadeIn" },
+          React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-2" }, "4. Detalhes para o Recurso"),
+          React.createElement('p', { className: "text-gray-600 mb-6" }, "Responda as perguntas abaixo para gerar um recurso de glosa robusto para o grupo selecionado."),
+          React.createElement('div', { className: "space-y-6" },
+            createQuestionBlock("medicalRequest", "O procedimento/exame foi realizado conforme a solicitação médica?", data.medicalRequest === 'sim', 
+              React.createElement(FileUpload, { onFilesChange: handleFileChange('medicalRequestFiles'), files: data.medicalRequestFiles, acceptedFormats: ".pdf,.doc,.docx,.jpg,.png", label: "Anexe a prescrição médica ou justificativa" })
+            ),
+            createQuestionBlock("contractCompliance", "O procedimento está de acordo com o contrato/cobertura?", data.contractCompliance === 'sim',
+              React.createElement('input', { type: "text", id: "contractClause", value: data.contractClause, onChange: handleChange, placeholder: "Especifique a cláusula ou item do contrato", className: "w-full p-2 border border-gray-300 rounded-md" })
+            ),
+            createQuestionBlock("priorAuthorization", "Houve autorização prévia para o procedimento?", data.priorAuthorization === 'sim',
+              React.createElement(FileUpload, { onFilesChange: handleFileChange('priorAuthorizationFiles'), files: data.priorAuthorizationFiles, acceptedFormats: ".pdf,.doc,.docx,.xml", label: "Anexe a guia de autorização" })
+            ),
+            createQuestionBlock("isCorrectProcedureCode", "O código do procedimento está correto?", data.isCorrectProcedureCode === 'nao',
+              React.createElement('input', { type: "text", id: "correctProcedureCode", value: data.correctProcedureCode, onChange: handleChange, placeholder: "Qual o código correto?", className: "w-full p-2 border border-gray-300 rounded-md" })
+            ),
+            createQuestionBlock("isCorrectValue", "O valor cobrado está de acordo com a tabela?", data.isCorrectValue === 'nao',
+              React.createElement('input', { type: "text", id: "correctValue", value: data.correctValue, onChange: handleChange, placeholder: "Qual o valor correto?", className: "w-full p-2 border border-gray-300 rounded-md" })
+            ),
+            createQuestionBlock("hasAdditionalDocuments", "Há algum documento adicional que comprove a realização?", data.hasAdditionalDocuments === 'sim',
+              React.createElement(FileUpload, { onFilesChange: handleFileChange('additionalFiles'), files: data.additionalFiles, acceptedFormats: ".pdf,.doc,.docx,.jpg,.png,.txt,.zip", label: "Anexe documentos adicionais", multiple: true })
+            ),
+            React.createElement('div', { className: "p-4 border border-gray-200 rounded-lg" },
+              React.createElement('label', { htmlFor: "technicalComments", className: "block text-gray-700 font-semibold mb-2" }, "Há algum comentário ou observação técnica?"),
+              React.createElement('textarea', { id: "technicalComments", value: data.technicalComments, onChange: handleChange, rows: 3, placeholder: "Digite aqui...", className: "w-full p-2 border border-gray-300 rounded-md" })
+            ),
+            React.createElement('div', { className: "p-4 border border-gray-200 rounded-lg" },
+              React.createElement('label', { htmlFor: "deadline", className: "block text-gray-700 font-semibold mb-2" }, "Qual o prazo para envio do recurso?"),
+              React.createElement('input', { type: "date", id: "deadline", value: data.deadline, onChange: handleChange, className: "w-full p-2 border border-gray-300 rounded-md" })
+            )
+          ),
+          React.createElement('div', { className: "flex justify-between mt-8" },
+            React.createElement('button', { onClick: onBack, className: "bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded transition-colors" }, "Voltar"),
+            React.createElement('button', { onClick: onNext, className: "bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded transition-colors" }, "Gerar Pré-visualização")
+          )
+        );
+      };
+
+      // From components/Step4Preview.tsx
+      const LoadingSpinner = () => React.createElement('div', { className: "flex flex-col items-center justify-center p-8" },
+        React.createElement('div', { className: "w-16 h-16 border-4 border-blue-200 border-t-blue-500 rounded-full animate-spin" }),
+        React.createElement('p', { className: "mt-4 text-gray-600" }, "Aguarde, a IA está gerando seu recurso...")
+      );
+
+      const Step4Preview = ({ generatedText, isLoading, onNext, onBack }) => {
+        return React.createElement('div', { className: "animate-fadeIn" },
+          React.createElement('h2', { className: "text-2xl font-bold text-gray-800 mb-2" }, "5. Pré-visualização do Recurso"),
+          React.createElement('p', { className: "text-gray-600 mb-6" }, "Confira a pré-visualização do recurso de glosa gerado pela IA. Se necessário, volte para ajustar as informações."),
+          React.createElement('div', { className: "resource-preview mt-4 p-5 border border-gray-300 rounded-md bg-gray-50 min-h-[300px] max-h-[500px] overflow-y-auto whitespace-pre-wrap font-mono text-sm" },
+            isLoading ? React.createElement(LoadingSpinner) : React.createElement('p', null, generatedText)
+          ),
+          !isLoading && generatedText && !generatedText.startsWith("Ocorreu um erro") && React.createElement('div', { className: "mt-6" },
+            React.createElement('p', { className: "text-gray-700 font-semibold mb-3" }, "O texto gerado está correto?"),
+            React.createElement('p', { className: "text-sm text-gray-500 mb-4" }, "Ao confirmar, você poderá baixar o recurso em diversos formatos.")
+          ),
+          React.createElement('div', { className: "flex justify-between mt-8" },
+            React.createElement('button', { onClick: onBack, disabled: isLoading, className: "bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-6 rounded transition-colors disabled:bg-gray-100" }, "Voltar e Editar"),
+            React.createElement('button', { onClick: onNext, disabled: isLoading || !generatedText || generatedText.startsWith("Ocorreu um erro"), className: "bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded transition-colors disabled:bg-green-300 disabled:cursor-not-allowed" }, "Confirmar e Gerar Arquivos")
+          )
+        );
+      };
+      
+      // From components/SuccessMessage.tsx
+      const DownloadButton = ({ icon, label, onClick }) => React.createElement('button', { onClick, className: "flex-1 min-w-[120px] bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded transition-colors flex items-center justify-center gap-2" },
+          React.createElement('i', { className: `fas ${icon}` }),
+          React.createElement('span', null, label)
+      );
+
+      const SuccessMessage = ({ data, generatedText, onProcessAnother }) => {
+        const baseFileName = `Recurso_Glosa_${data.guiaNumber}_${new Date().getTime()}`;
+
+        const downloadPdf = () => {
+          const { jsPDF } = jspdf;
+          const doc = new jsPDF();
+          doc.setFontSize(16);
+          doc.text("Recurso de Glosa", 10, 10);
+          doc.setFontSize(12);
+          const splitText = doc.splitTextToSize(generatedText, 180);
+          doc.text(splitText, 10, 20);
+          doc.save(`${baseFileName}.pdf`);
+        };
+
+        const downloadDocx = () => {
+          try {
+              const paragraphs = generatedText.split('\\n').map(p => new docx.Paragraph({ children: [new docx.TextRun(p)] }));
+              const doc = new docx.Document({ sections: [{ children: paragraphs }] });
+              docx.Packer.toBlob(doc).then(blob => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${baseFileName}.docx`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              }).catch(error => {
+                  console.error("Erro ao gerar o arquivo DOCX:", error);
+                  alert("Não foi possível gerar o arquivo DOCX. Verifique o console para mais detalhes.");
+              });
+          } catch(e) {
+              console.error("Erro ao gerar o arquivo DOCX:", e);
+              alert("Não foi possível gerar o arquivo DOCX. Verifique o console para mais detalhes.");
+          }
+        };
+
+        const downloadXlsx = () => {
+          const worksheetData = [
+            ["Número da Guia", data.guiaNumber], ["Total Glosado", data.totalGlosaValue], ["Total de Itens", data.totalGlosas], [],
+            ["Paciente", "Cód. Procedimento", "Valor Glosado", "Justificativa"]
+          ];
+          data.glosaItems.forEach(item => worksheetData.push([item.patientName, item.procedureCode, item.glosaValue, item.glosaJustification]));
+          const ws = XLSX.utils.aoa_to_sheet(worksheetData);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, "Detalhes Recurso");
+          XLSX.writeFile(wb, `${baseFileName}.xlsx`);
+        };
+
+        const downloadXml = () => {
+          let xmlString = `<?xml version="1.0" encoding="UTF-8"?>\\n<recursoGlosa>\\n  <guiaNumber>${data.guiaNumber}</guiaNumber>\\n  <totalGlosaValue>${data.totalGlosaValue}</totalGlosaValue>\\n  <totalGlosas>${data.totalGlosas}</totalGlosas>\\n  <items>\\n`;
+          data.glosaItems.forEach(item => { xmlString += `    <item>\\n      <patientName>${item.patientName}</patientName>\\n      <insuranceId>${item.insuranceId}</insuranceId>\\n      <procedureCode>${item.procedureCode}</procedureCode>\\n      <glosaValue>${item.glosaValue}</glosaValue>\\n      <glosaJustification>${item.glosaJustification}</glosaJustification>\\n    </item>\\n`; });
+          xmlString += `  </items>\\n  <textoRecurso><![CDATA[${generatedText}]]></textoRecurso>\\n</recursoGlosa>`;
+          const blob = new Blob([xmlString], { type: 'application/xml;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = `${baseFileName}.xml`;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        };
+
+        const downloadTxt = () => {
+          const blob = new Blob([generatedText], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url; a.download = `${baseFileName}.txt`;
+          document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        };
+
+        return React.createElement('div', { className: "animate-fadeIn text-center p-8 bg-green-50 border border-green-200 rounded-lg" },
+          React.createElement('h3', { className: "text-2xl font-bold text-green-800 mb-3" }, React.createElement('i', { className: "fas fa-check-circle mr-2" }), " Recurso Gerado com Sucesso!"),
+          React.createElement('p', { className: "text-gray-700 mb-6" }, "Selecione o formato desejado para baixar o recurso para este grupo."),
+          React.createElement('div', { className: "flex flex-wrap justify-center gap-4" },
+            React.createElement(DownloadButton, { icon: "fa-file-pdf", label: "PDF", onClick: downloadPdf }),
+            React.createElement(DownloadButton, { icon: "fa-file-word", label: "DOCX", onClick: downloadDocx }),
+            React.createElement(DownloadButton, { icon: "fa-file-excel", label: "XLSX", onClick: downloadXlsx }),
+            React.createElement(DownloadButton, { icon: "fa-file-code", label: "XML", onClick: downloadXml }),
+            React.createElement(DownloadButton, { icon: "fa-file-alt", label: "TXT", onClick: downloadTxt })
+          ),
+          React.createElement('div', { className: "mt-8" },
+            React.createElement('button', { onClick: onProcessAnother, className: "bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-8 rounded transition-colors" }, "Recorrer Outro Grupo")
+          )
+        );
+      };
+
+      // From App.tsx
+      const initialData = {
+        fileName: '', guiaNumber: '', glosaItems: [], totalGlosas: 0, totalGlosaValue: 0,
+        medicalRequest: '', medicalRequestFiles: [], contractCompliance: '', contractClause: '',
+        priorAuthorization: '', priorAuthorizationFiles: [], isCorrectProcedureCode: '',
+        correctProcedureCode: '', isCorrectValue: '', correctValue: '', hasAdditionalDocuments: '',
+        additionalFiles: [], technicalComments: '', deadline: '',
+      };
+
+      function App() {
+        const [currentStep, setCurrentStep] = useState(Step.Upload);
+        const [data, setData] = useState(initialData);
+        const [isLoading, setIsLoading] = useState(false);
+        const [generatedText, setGeneratedText] = useState('');
+        const [glosaGroups, setGlosaGroups] = useState([]);
+        const [selectedGroupKey, setSelectedGroupKey] = useState(null);
+        const [processedGroupKeys, setProcessedGroupKeys] = useState(new Set());
+
+        const handleDataExtracted = (extractedData) => {
+          const items = extractedData.glosaItems || [];
+          const groupsMap = {};
+          items.forEach(item => {
+            const guia = item.insuranceId || extractedData.guiaNumber || 'GUIA_NAO_IDENTIFICADA';
+            const just = item.glosaJustification || 'JUSTIFICATIVA_NAO_IDENTIFICADA';
+            const key = `${guia}::${just}`;
+            if (!groupsMap[key]) {
+              groupsMap[key] = { key, guiaNumber: guia, glosaJustification: just, glosaItems: [], totalGlosas: 0, totalGlosaValue: 0 };
+            }
+            groupsMap[key].glosaItems.push(item);
+          });
+          const groupsArray = Object.values(groupsMap).map(group => {
+            const totalGlosaValue = group.glosaItems.reduce((sum, item) => {
+              const valueString = (item.glosaValue || '0').replace(/\./g, '').replace(',', '.');
+              const value = parseFloat(valueString);
+              return sum + (isNaN(value) ? 0 : value);
+            }, 0);
+            return { ...group, totalGlosas: group.glosaItems.length, totalGlosaValue };
+          });
+          setGlosaGroups(groupsArray);
+          setCurrentStep(Step.Confirm);
+        };
+
+        const handleSelectGroup = (group) => {
+          setData({ ...initialData, fileName: data.fileName, guiaNumber: group.guiaNumber, glosaItems: group.glosaItems, totalGlosas: group.totalGlosas, totalGlosaValue: group.totalGlosaValue });
+          setSelectedGroupKey(group.key);
+        };
+
+        const handleDeselectGroup = () => { setSelectedGroupKey(null); setData(initialData); };
+
+        const handleGeneratePreview = async () => {
+          setIsLoading(true);
+          setCurrentStep(Step.Preview);
+          try {
+            const text = await generateAppealText(data);
+            setGeneratedText(text);
+          } catch (e) {
+            setGeneratedText(`Ocorreu um erro ao gerar o texto do recurso: ${e.message || String(e)}`);
+          } finally {
+            setIsLoading(false);
+          }
+        };
+        
+        const handleProcessAnother = () => {
+          if(selectedGroupKey) setProcessedGroupKeys(prev => new Set(prev).add(selectedGroupKey));
+          setSelectedGroupKey(null);
+          setGeneratedText('');
+          setData(initialData);
+          setCurrentStep(Step.Confirm);
+        };
+
+        const handleStartOver = () => {
+          setData(initialData); setGeneratedText(''); setGlosaGroups([]);
+          setSelectedGroupKey(null); setProcessedGroupKeys(new Set()); setCurrentStep(Step.Upload);
+        };
+
+        const renderStep = () => {
+          switch (currentStep) {
+            case Step.Upload: return React.createElement(Step1Upload, { onDataExtracted: handleDataExtracted, initialData });
+            case Step.Confirm: return React.createElement(Step2Confirm, { data, groups: glosaGroups, selectedGroupKey, processedGroupKeys, onSelectGroup: handleSelectGroup, onDeselectGroup: handleDeselectGroup, onNext: () => setCurrentStep(Step.Questions), onStartOver: handleStartOver });
+            case Step.Questions: return React.createElement(Step3Questions, { data, setData, onNext: handleGeneratePreview, onBack: () => setCurrentStep(Step.Confirm) });
+            case Step.Preview: return React.createElement(Step4Preview, { generatedText, isLoading, onNext: () => setCurrentStep(Step.Success), onBack: () => setCurrentStep(Step.Questions) });
+            case Step.Success: return React.createElement(SuccessMessage, { data, generatedText, onProcessAnother: handleProcessAnother });
+            default: return React.createElement('div', null, "Etapa desconhecida");
+          }
+        };
+
+        return React.createElement('div', { className: "min-h-screen flex items-center justify-center p-4 bg-gray-100" },
+          React.createElement('div', { className: "container max-w-4xl mx-auto p-8 bg-white rounded-xl shadow-2xl" },
+            React.createElement('div', { className: "text-center mb-8" },
+              React.createElement('h1', { className: "text-3xl font-bold text-gray-800" }, "📄 Aplicativo de Recurso de Glosa"),
+              React.createElement('p', { className: "text-gray-500 mt-2" }, "Siga os passos abaixo para gerar seu recurso de glosa automaticamente com IA.")
+            ),
+            React.createElement('div', { className: "mt-8" },
+              React.createElement(ProgressTracker, { currentStep }),
+              renderStep()
+            )
+          )
+        );
+      }
+
+      // From index.tsx
+      const rootElement = document.getElementById('root');
+      if (!rootElement) {
+        throw new Error("Could not find root element to mount to");
+      }
+      const root = createRoot(rootElement);
+      root.render(
+        React.createElement(StrictMode, null, React.createElement(App))
+      );
+    </script>
+  </body>
+</html>

@@ -1,8 +1,0 @@
-export function Step3Questions() {
-  return (
-    <div>
-      <h2>Etapa 3: Perguntas</h2>
-      <p>Adicione observações ou respostas sobre a análise.</p>
-    </div>
-  );
-}
